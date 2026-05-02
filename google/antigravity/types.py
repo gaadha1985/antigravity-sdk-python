@@ -189,6 +189,7 @@ class BuiltinTools(str, enum.Enum):
   RUN_COMMAND = "run_command"
   ASK_QUESTION = "ask_question"
   START_SUBAGENT = "start_subagent"
+  GENERATE_IMAGE = "generate_image"
 
   @classmethod
   def read_only(cls) -> list["BuiltinTools"]:
@@ -207,6 +208,7 @@ class BuiltinTools(str, enum.Enum):
         cls.EDIT_FILE,
         cls.ASK_QUESTION,
         cls.START_SUBAGENT,
+        cls.GENERATE_IMAGE,
     ]
 
 
@@ -223,12 +225,15 @@ class CapabilitiesConfig(pydantic.BaseModel):
       (all tools enabled).
     compaction_threshold: Token count after which the context window may be
       compacted. When None, the backend's default is used.
+    image_model: The model to use for image generation. Defaults to
+      'gemini-3.1-flash-image-preview'.
   """
 
   enable_subagents: bool = True
   enabled_tools: list[BuiltinTools] | None = None
   disabled_tools: list[BuiltinTools] | None = None
   compaction_threshold: int | None = None
+  image_model: str = "gemini-3.1-flash-image-preview"
 
   @pydantic.model_validator(mode="after")
   def _check_mutually_exclusive(self) -> "CapabilitiesConfig":

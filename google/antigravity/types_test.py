@@ -619,6 +619,7 @@ class BuiltinToolsTest(unittest.TestCase):
         types.BuiltinTools.RUN_COMMAND,
         types.BuiltinTools.ASK_QUESTION,
         types.BuiltinTools.START_SUBAGENT,
+        types.BuiltinTools.GENERATE_IMAGE,
     }
     self.assertEqual(
         read_only | write_tools,

@@ -708,6 +708,7 @@ class LocalConnectionStrategyConfigTest(unittest.TestCase):
     self.assertTrue(config.harness_side_tools.user_questions.enabled)
     self.assertTrue(config.harness_side_tools.run_command.enabled)
     self.assertTrue(config.harness_side_tools.find.enabled)
+    self.assertTrue(config.harness_side_tools.generate_image.enabled)
     # No gemini config, system instructions, workspaces, or skills by default.
     self.assertFalse(config.HasField("gemini_config"))
     self.assertFalse(config.HasField("system_instructions"))
@@ -928,12 +929,14 @@ class LocalConnectionStrategyConfigTest(unittest.TestCase):
             disabled_tools=[
                 types.BuiltinTools.RUN_COMMAND,
                 types.BuiltinTools.ASK_QUESTION,
+                types.BuiltinTools.GENERATE_IMAGE,
             ],
         )
     )
     config = strategy._build_harness_config()
     self.assertFalse(config.harness_side_tools.run_command.enabled)
     self.assertFalse(config.harness_side_tools.user_questions.enabled)
+    self.assertFalse(config.harness_side_tools.generate_image.enabled)
     # Subagents are not in BuiltinTools; should still be enabled by default.
     self.assertTrue(config.harness_side_tools.subagents.enabled)
     # Tools that were not disabled should still be enabled.

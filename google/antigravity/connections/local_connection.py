@@ -98,6 +98,7 @@ _BUILTIN_TOOL_PROTO_FIELDS: dict[types.BuiltinTools, str] = {
     types.BuiltinTools.SEARCH_DIR: "search_directory",
     types.BuiltinTools.VIEW_FILE: "view_file",
     types.BuiltinTools.START_SUBAGENT: "invoke_subagent",
+    types.BuiltinTools.GENERATE_IMAGE: "generate_image",
 }
 
 # Fallback action name used when a tool confirmation request does not match any
@@ -994,6 +995,10 @@ class LocalConnectionStrategy(connection.ConnectionStrategy):
         ),
         list_dir=localharness_pb2.ListDirToolConfig(
             enabled=types.BuiltinTools.LIST_DIR in active_tools
+        ),
+        generate_image=localharness_pb2.GenerateImageToolConfig(
+            enabled=types.BuiltinTools.GENERATE_IMAGE in active_tools,
+            model_name=cfg.image_model,
         ),
     )
 
