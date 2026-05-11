@@ -18,6 +18,24 @@ Key features:
 
 A wrapper class for callables that have an explicit JSON Schema defined. This is useful for tools that come from external sources like MCP servers.
 
+### `ToolContext`
+
+`ToolContext` is a conversation-aware context injected into tools that request
+it. It provides access to the connection and a per-conversation state store.
+
+This is useful when a tool needs to:
+
+- Maintain state across multiple invocations within the same conversation (e.g.,
+  a cursor for pagination or a scratchpad).
+- Access conversation metadata or the underlying connection to perform advanced
+  operations.
+- Share data with other tools used in the same conversation.
+
+**Note on State Sharing**: The state store in `ToolContext` (accessed via
+`get_state` and `set_state`) is independent of the `HookContext` used by hooks.
+State set by a tool is not visible to hooks. Similarly, state set by hooks is
+not visible to tools. See `hooks/README.md` for details on this separation.
+
 ## Available Tools and Utilities
 
 ## Usage Example

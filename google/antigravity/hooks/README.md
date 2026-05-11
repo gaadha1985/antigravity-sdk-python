@@ -70,6 +70,39 @@ This hierarchy ensures that state set in a broader scope is visible to narrower
 scopes, but not from narrower to broader scopes, preventing cross-talk and
 ensuring proper cleanup.
 
+### Two Complementary Context Systems
+
+The Antigravity SDK has two independent context/state systems:
+
+- **`HookContext`** (and its subclasses): Hierarchical key-value store for hooks.
+- **`ToolContext`**: Separate key-value store for tools.
+
+These systems do **not** share state. A hook cannot read what a tool wrote to
+`ToolContext.set_state()`. Similarly, a tool cannot read what a hook wrote to
+`HookContext`.
+
+This separation is intentional due to:
+
+- **Different Lifecycles**: `HookContext` instances are often short-lived (per
+  operation or turn), while `ToolContext` is session-scoped.
+- **Threading Models**: Tools may run in separate threads (for sync tools),
+  while hooks run on the main event loop.
+- **Purpose**: Hooks use a hierarchical context (`HookContext`) to share state
+  across lifecycle events in a single turn or session. Tools use a flat,
+  session-scoped context (`ToolContext`) focused on data needed for execution.
+    - *Example (HookContext)*: A `PreTurnHook` can store a `correlation_id` in
+      the `TurnContext`. A subsequent `PreToolCallHook` in the same turn can
+      read this `correlation_id` to annotate logs, correlating the tool call
+      with the original user prompt.
+    - *Example (ToolContext)*: A pagination tool can store a `next_page_token`
+      in the `ToolContext`. In the next turn, if the model calls the same tool
+      again, the tool can read the token to fetch the next page without the
+      model needing to remember it.
+
+If you need to share state between hooks and tools, consider using an external
+state store or passing identifiers that allow both systems to look up shared
+data in a common database or service.
+
 ## Connection Compatibility
 
 Hook behavior depends on the connection type.
