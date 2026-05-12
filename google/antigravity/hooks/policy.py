@@ -72,6 +72,8 @@ from google.antigravity import types
 from google.antigravity.hooks import hooks
 
 
+
+
 _logger = logging.getLogger(__name__)
 
 # A predicate receives the tool call's argument dict and returns whether
@@ -195,6 +197,24 @@ def allow_all() -> Policy:
     A Policy that approves every tool call.
   """
   return allow(_WILDCARD, name="allow_all")
+
+
+def safe_defaults(handler: AskUserHandler) -> list[Policy]:
+  """Creates a set of safe default policies.
+
+  Allows all read-only tools and asks the user for any other tool calls.
+
+  Args:
+    handler: The handler to invoke for ASK_USER decisions.
+
+  Returns:
+    A list of Policies.
+  """
+  policies = []
+  for tool in types.BuiltinTools.read_only():
+    policies.append(allow(tool.value))
+  policies.append(ask_user("*", handler=handler))
+  return policies
 
 
 def deny_all() -> Policy:

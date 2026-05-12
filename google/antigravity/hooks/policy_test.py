@@ -542,5 +542,46 @@ class IntegrationWithHookRunnerTest(unittest.IsolatedAsyncioTestCase):
     self.assertFalse(result.allow)
 
 
+class SafeDefaultsTest(unittest.IsolatedAsyncioTestCase):
+  """Verifies safe_defaults() preset."""
+
+  async def test_safe_defaults_allows_read_only_tools(self):
+    """safe_defaults() must allow read-only tools."""
+
+    def handler(_):
+      return False
+
+    policies = policy.safe_defaults(handler=handler)
+    hook = policy.enforce(policies)
+    ctx = hooks.HookContext()
+
+    for tool in (
+        "list_directory",
+        "search_directory",
+        "find_file",
+        "view_file",
+        "finish",
+    ):
+      result = await hook.run(ctx, _make_tool_call(tool))
+      self.assertTrue(result.allow, f"{tool} should be allowed")
+
+  async def test_safe_defaults_asks_for_other_tools(self):
+    """safe_defaults() must ask for non-read-only tools."""
+    handler_called = False
+
+    def handler(_):
+      nonlocal handler_called
+      handler_called = True
+      return True
+
+    policies = policy.safe_defaults(handler=handler)
+    hook = policy.enforce(policies)
+    ctx = hooks.HookContext()
+
+    result = await hook.run(ctx, _make_tool_call("run_command"))
+    self.assertTrue(result.allow)
+    self.assertTrue(handler_called)
+
+
 if __name__ == "__main__":
   unittest.main()
