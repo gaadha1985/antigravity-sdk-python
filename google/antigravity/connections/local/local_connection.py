@@ -25,7 +25,7 @@ import shutil
 import struct
 import subprocess
 import threading
-from typing import Any, AsyncIterator, Callable
+from typing import Any, AsyncIterator, Callable, NamedTuple
 
 from google.genai import types as genai_types
 from google.protobuf import json_format
@@ -34,6 +34,7 @@ import websockets
 from google.antigravity import types
 from google.antigravity.connections import connection
 from google.antigravity.connections.local import localharness_pb2
+from google.antigravity.connections.local import types as local_types
 from google.antigravity.hooks import hook_runner as h_runner
 from google.antigravity.hooks import hooks
 from google.antigravity.tools import tool_runner as t_runner
@@ -109,6 +110,88 @@ _BUILTIN_TOOL_PROTO_FIELDS: dict[types.BuiltinTools, str] = {
 # known BuiltinTools proto field. This represents a pre-request notification
 # from the Connection for a host-side tool whose specific call will follow.
 DEFAULT_HOST_TOOL_NAME = "pre_request_host_tool_request"
+
+
+class _PendingCallKey(NamedTuple):
+  """Key for tracking approved built-in tool calls."""
+
+  trajectory_id: str
+  step_index: int
+
+
+class _PendingCallValue(NamedTuple):
+  """Value for tracking approved built-in tool calls."""
+
+  tool_call: types.ToolCall
+  operation_context: hooks.OperationContext
+
+
+def _extract_tool_result(
+    step_update: localharness_pb2.StepUpdate,
+) -> "local_types.ToolOutput | None":
+  """Extracts a structured tool result from per-action fields.
+
+  The Go harness populates result data on the action sub-messages of
+  StepUpdate (e.g. ActionRunCommand.combined_output,
+  ActionListDirectory.results) when the step transitions to STATE_DONE.
+  This function inspects each action field and returns a typed result
+  object.
+
+  Each StepUpdate corresponds to a single tool execution, so at most one
+  action field will be set. The elif chain returns the first match.
+
+  Args:
+    step_update: The StepUpdate proto from the harness.
+
+  Returns:
+    A typed result object, or None if no structured result is present.
+  """
+  _run_command = _BUILTIN_TOOL_PROTO_FIELDS[types.BuiltinTools.RUN_COMMAND]
+  _list_dir = _BUILTIN_TOOL_PROTO_FIELDS[types.BuiltinTools.LIST_DIR]
+  _find_file = _BUILTIN_TOOL_PROTO_FIELDS[types.BuiltinTools.FIND_FILE]
+  _search_dir = _BUILTIN_TOOL_PROTO_FIELDS[types.BuiltinTools.SEARCH_DIR]
+  _edit_file = _BUILTIN_TOOL_PROTO_FIELDS[types.BuiltinTools.EDIT_FILE]
+  _gen_image = _BUILTIN_TOOL_PROTO_FIELDS[types.BuiltinTools.GENERATE_IMAGE]
+
+  # run_command -> raw stdout/stderr, e.g. "hello world\n"
+  if step_update.HasField(_run_command):
+    rc = step_update.run_command
+    if rc.combined_output:
+      return local_types.RunCommandResult(output=rc.combined_output)
+  # list_directory -> structured entry list
+  elif step_update.HasField(_list_dir):
+    ld = step_update.list_directory
+    if ld.results:
+      entries = [
+          local_types.ListDirectoryEntry(
+              name=r.name,
+              is_directory=r.is_directory,
+              file_size=r.file_size,
+          )
+          for r in ld.results
+      ]
+      return local_types.ListDirectoryResult(entries=entries)
+  # find_file -> raw find output, e.g. "/path/to/foo.py\n/path/to/bar.py"
+  elif step_update.HasField(_find_file):
+    ff = step_update.find_file
+    if ff.output:
+      return local_types.FindFileResult(output=ff.output)
+  # search_directory -> result count, e.g. "3 results"
+  elif step_update.HasField(_search_dir):
+    sd = step_update.search_directory
+    if sd.num_results:
+      return local_types.SearchDirectoryResult(num_results=sd.num_results)
+  # edit_file -> diff summary from step text
+  elif step_update.HasField(_edit_file):
+    ef = step_update.edit_file
+    if ef.diff_block:
+      return local_types.EditFileResult(summary=step_update.text)
+  # generate_image -> image filename, e.g. "sunset_photo"
+  elif step_update.HasField(_gen_image):
+    gi = step_update.generate_image
+    if gi.image_name:
+      return local_types.GenerateImageResult(image_name=gi.image_name)
+  return None
 
 
 def _make_step_id(trajectory_id: str, step_index: int) -> str:
@@ -348,6 +431,14 @@ class LocalConnection(connection.Connection):
     # error messages when the WebSocket closes unexpectedly.
     self._stderr_lines: collections.deque[str] = collections.deque(maxlen=100)
     self._stderr_thread: threading.Thread | None = None
+
+    # Tracks builtin tool calls that were approved via ToolConfirmation,
+    # keyed by (trajectory_id, step_index). When the step transitions to
+    # STATE_DONE or STATE_ERROR, we dispatch PostToolCallHook or
+    # OnToolErrorHook respectively.
+    self._pending_builtin_tool_calls: dict[
+        _PendingCallKey, _PendingCallValue
+    ] = {}
 
     # Dispatch session start hook.
     if self._hook_runner and self._hook_runner.on_session_start_hooks:
@@ -651,6 +742,41 @@ class LocalConnection(connection.Connection):
                 step_obj.content
             )
 
+          # Dispatch post-tool-call or on-tool-error hooks for built-in tools
+          # that were approved via ToolConfirmation. The harness executes them
+          # internally; we observe completion via step state transitions.
+          if (
+              step_key in self._pending_builtin_tool_calls
+              and step_update.state
+              == localharness_pb2.StepUpdate.State.STATE_DONE
+          ):
+            tc, op_ctx = self._pending_builtin_tool_calls.pop(step_key)
+            if self._hook_runner:
+              extracted = _extract_tool_result(step_update)
+              result = types.ToolResult(
+                  name=tc.name,
+                  id=tc.id,
+                  result=extracted or step_obj.content,
+              )
+              self._run_in_background(
+                  self._hook_runner.dispatch_post_tool_call(op_ctx, result)
+              )
+          elif (
+              step_key in self._pending_builtin_tool_calls
+              and step_update.state
+              == localharness_pb2.StepUpdate.State.STATE_ERROR
+          ):
+            _, op_ctx = self._pending_builtin_tool_calls.pop(step_key)
+            if self._hook_runner:
+              error = RuntimeError(
+                  step_update.error_message
+                  or step_obj.content
+                  or "Built-in tool failed"
+              )
+              self._run_in_background(
+                  self._hook_runner.dispatch_on_tool_error(op_ctx, error)
+              )
+
           # 4. Process wait requests if this is a wait state
           if (
               step_update.state
@@ -844,6 +970,7 @@ class LocalConnection(connection.Connection):
         args=args,
     )
     allow = True
+    op_ctx = None
     # Auto-approve pre-requests for host tools because the actual tool call will
     # be sent next with its proper name and arguments, triggering its own
     # confirmation.
@@ -853,10 +980,27 @@ class LocalConnection(connection.Connection):
       ctx = self._current_turn_context or hooks.TurnContext(
           self._hook_runner.session_context
       )
-      res, _, _ = await self._hook_runner.dispatch_pre_tool_call(
+      res, _, op_ctx = await self._hook_runner.dispatch_pre_tool_call(
           turn_context=ctx, tool_call=tc
       )
       allow = res.allow
+
+    # Track approved built-in tool calls so we can dispatch PostToolCallHook
+    # when the step transitions to STATE_DONE.
+    if allow and tc.name != DEFAULT_HOST_TOOL_NAME and self._hook_runner:
+      if op_ctx is None:
+        ctx = self._current_turn_context or hooks.TurnContext(
+            self._hook_runner.session_context
+        )
+        op_ctx = hooks.OperationContext(ctx)
+      pending_key = _PendingCallKey(
+          trajectory_id=step_update.trajectory_id,
+          step_index=step_update.step_index,
+      )
+      self._pending_builtin_tool_calls[pending_key] = _PendingCallValue(
+          tool_call=tc,
+          operation_context=op_ctx,
+      )
 
     resp = localharness_pb2.ToolConfirmation(
         trajectory_id=step_update.trajectory_id,

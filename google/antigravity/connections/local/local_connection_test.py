@@ -2928,5 +2928,485 @@ class LocalAgentConfigTest(unittest.TestCase):
     self.assertEqual(p.decision, policy.Decision.APPROVE)
 
 
+class LocalConnectionBuiltinToolHooksTest(unittest.IsolatedAsyncioTestCase):
+  """Tests for PostToolCallHook / OnToolErrorHook dispatch for built-in tools.
+
+  Built-in tools (run_command, list_directory, etc.) execute inside the Go
+  harness and report results via StepUpdate proto messages over WebSocket.
+  The SDK tracks approved tool calls via _pending_builtin_tool_calls and
+  dispatches PostToolCallHook (on STATE_DONE) or OnToolErrorHook (on
+  STATE_ERROR) with structured results extracted by _extract_tool_result().
+
+  These tests simulate the full confirmation→completion lifecycle for each
+  built-in tool type, verifying that hooks receive the correct typed result.
+  """
+
+  def setUp(self):
+    super().setUp()
+    self.mock_process = mock.MagicMock(spec=subprocess.Popen)
+    self.tool_runner = tool_runner.ToolRunner()
+
+  def _make_harness(self, hr):
+    """Creates a TestLocalHarness with the given HookRunner."""
+    return test_utils.TestLocalHarness(
+        test_case=self,
+        process=self.mock_process,
+        tool_runner=self.tool_runner,
+        hook_runner=hr,
+    )
+
+  async def _confirm_and_complete(self, harness, confirm_event, done_event):
+    """Sends a confirmation request and then a completion event.
+
+    Args:
+      harness: The TestLocalHarness instance.
+      confirm_event: The OutputEvent with STATE_WAITING_FOR_USER.
+      done_event: The OutputEvent with STATE_DONE or STATE_ERROR.
+
+    Returns:
+      The confirmation response dict from the SDK.
+    """
+    await harness.send_event(confirm_event)
+    sent_data = await harness.wait_for_response()
+    await harness.send_event(done_event)
+    return sent_data
+
+  def _make_confirm_event(self, step_index, traj_id, **action_kwargs):
+    """Builds a STATE_WAITING_FOR_USER OutputEvent with an action field."""
+    return localharness_pb2.OutputEvent(
+        step_update=localharness_pb2.StepUpdate(
+            step_index=step_index,
+            trajectory_id=traj_id,
+            cascade_id=traj_id,
+            state=localharness_pb2.StepUpdate.STATE_WAITING_FOR_USER,
+            tool_confirmation_request=localharness_pb2.ToolConfirmationRequest(),
+            **action_kwargs,
+        )
+    )
+
+  def _make_done_event(self, step_index, traj_id, **action_kwargs):
+    """Builds a STATE_DONE OutputEvent with an action field."""
+    return localharness_pb2.OutputEvent(
+        step_update=localharness_pb2.StepUpdate(
+            step_index=step_index,
+            trajectory_id=traj_id,
+            cascade_id=traj_id,
+            state=localharness_pb2.StepUpdate.STATE_DONE,
+            source=localharness_pb2.StepUpdate.SOURCE_MODEL,
+            **action_kwargs,
+        )
+    )
+
+  async def _run_post_hook_test(
+      self,
+      confirm_kwargs,
+      done_kwargs,
+      expected_name,
+      expected_type,
+      assertions_fn,
+  ):
+    """Runs the confirm→done→assert pattern for a PostToolCallHook test.
+
+    Args:
+      confirm_kwargs: kwargs for _make_confirm_event (action fields).
+      done_kwargs: kwargs for _make_done_event (action + result fields).
+      expected_name: Expected ToolResult.name value.
+      expected_type: Expected type of ToolResult.result.
+      assertions_fn: Callable(result) for type-specific assertions.
+    """
+    hook_event = asyncio.Event()
+    captured = []
+
+    class PostHook(hooks_base.PostToolCallHook):  # pylint: disable=unused-argument
+
+      async def run(self, context, data):
+        captured.append(data)
+        hook_event.set()
+
+    hr = hook_runner.HookRunner()
+    hr.register_hook(PostHook())
+    harness = self._make_harness(hr)
+
+    confirm = self._make_confirm_event(0, "traj", **confirm_kwargs)
+    done = self._make_done_event(0, "traj", **done_kwargs)
+    sent_data = await self._confirm_and_complete(harness, confirm, done)
+    self.assertTrue(sent_data["toolConfirmation"]["accepted"])
+
+    await harness.wait_for_event(hook_event)
+
+    self.assertEqual(len(captured), 1)
+    result = captured[0]
+    self.assertEqual(result.name, expected_name)
+    if expected_type is not None:
+      self.assertIsInstance(result.result, expected_type)
+    assertions_fn(result)
+
+  # ---- Per-tool-type tests ----
+
+  async def test_tool_result_for_run_command(self):
+    """Verifies PostToolCallHook receives RunCommandResult for run_command.
+
+    What: PostToolCallHook receives a RunCommandResult with combined_output.
+    Why: run_command is the most common built-in tool; its stdout/stderr must
+         be available to hooks for logging, auditing, and policy enforcement.
+    How: Simulate approval + STATE_DONE with combined_output set; assert the
+         hook receives RunCommandResult with the correct output string.
+    """
+    from google.antigravity.connections.local import types as local_types  # pylint: disable=g-import-not-at-top
+
+    await self._run_post_hook_test(
+        confirm_kwargs=dict(
+            run_command=localharness_pb2.ActionRunCommand(
+                command_line="echo hello",
+            ),
+        ),
+        done_kwargs=dict(
+            run_command=localharness_pb2.ActionRunCommand(
+                command_line="echo hello",
+                combined_output="hello\n",
+            ),
+        ),
+        expected_name=types.BuiltinTools.RUN_COMMAND.value,
+        expected_type=local_types.RunCommandResult,
+        assertions_fn=lambda r: self.assertEqual(r.result.output, "hello\n"),
+    )
+
+  async def test_tool_result_for_list_directory(self):
+    """Verifies PostToolCallHook receives ListDirectoryResult for list_dir.
+
+    What: PostToolCallHook receives a ListDirectoryResult with structured
+          directory entries.
+    Why: list_directory returns structured entry data (name, is_directory,
+         file_size) via Result sub-messages, unlike tools that return raw text.
+         This tests the most complex extraction branch in _extract_tool_result.
+    How: Simulate approval + STATE_DONE with two Result entries; assert the
+         hook receives ListDirectoryResult with correctly parsed entries.
+    """
+    from google.antigravity.connections.local import types as local_types  # pylint: disable=g-import-not-at-top
+
+    await self._run_post_hook_test(
+        confirm_kwargs=dict(
+            list_directory=localharness_pb2.ActionListDirectory(
+                directory_path="/tmp/test",
+            ),
+        ),
+        done_kwargs=dict(
+            list_directory=localharness_pb2.ActionListDirectory(
+                directory_path="/tmp/test",
+                results=[
+                    localharness_pb2.ActionListDirectory.Result(
+                        name="foo.py", file_size=100
+                    ),
+                    localharness_pb2.ActionListDirectory.Result(
+                        name="bar", is_directory=True
+                    ),
+                ],
+            ),
+        ),
+        expected_name=types.BuiltinTools.LIST_DIR.value,
+        expected_type=local_types.ListDirectoryResult,
+        assertions_fn=lambda r: (
+            self.assertEqual(len(r.result.entries), 2),
+            self.assertEqual(r.result.entries[0].name, "foo.py"),
+        ),
+    )
+
+  async def test_tool_result_for_find_file(self):
+    """Verifies PostToolCallHook receives FindFileResult for find_file.
+
+    What: PostToolCallHook receives a FindFileResult with raw find output.
+    Why: find_file returns a newline-separated list of matching file paths.
+         Hooks may use this for auditing which files were discovered.
+    How: Simulate approval + STATE_DONE with output set; assert the hook
+         receives FindFileResult with the correct output string.
+    """
+    from google.antigravity.connections.local import types as local_types  # pylint: disable=g-import-not-at-top
+
+    await self._run_post_hook_test(
+        confirm_kwargs=dict(
+            find_file=localharness_pb2.ActionFindFile(
+                directory_path="/tmp/searchdir",
+                query="target.txt",
+            ),
+        ),
+        done_kwargs=dict(
+            find_file=localharness_pb2.ActionFindFile(
+                directory_path="/tmp/searchdir",
+                query="target.txt",
+                output="/tmp/searchdir/target.txt",
+            ),
+        ),
+        expected_name=types.BuiltinTools.FIND_FILE.value,
+        expected_type=local_types.FindFileResult,
+        assertions_fn=lambda r: self.assertEqual(
+            r.result.output, "/tmp/searchdir/target.txt"
+        ),
+    )
+
+  async def test_tool_result_for_search_directory(self):
+    """Verifies PostToolCallHook receives SearchDirectoryResult for grep_search.
+
+    What: PostToolCallHook receives a SearchDirectoryResult with num_results.
+    Why: search_directory (grep_search) returns a count of matching results.
+         Hooks may use this for observability (e.g. "search found N results").
+    How: Simulate approval + STATE_DONE with num_results=3; assert the hook
+         receives SearchDirectoryResult with the correct count.
+    """
+    from google.antigravity.connections.local import types as local_types  # pylint: disable=g-import-not-at-top
+
+    await self._run_post_hook_test(
+        confirm_kwargs=dict(
+            search_directory=localharness_pb2.ActionSearchDirectory(
+                directory_path="/tmp",
+                query="hello",
+            ),
+        ),
+        done_kwargs=dict(
+            search_directory=localharness_pb2.ActionSearchDirectory(
+                directory_path="/tmp",
+                query="hello",
+                num_results=3,
+            ),
+        ),
+        expected_name=types.BuiltinTools.SEARCH_DIR.value,
+        expected_type=local_types.SearchDirectoryResult,
+        assertions_fn=lambda r: self.assertEqual(r.result.num_results, 3),
+    )
+
+  async def test_tool_result_for_edit_file(self):
+    """Verifies PostToolCallHook receives EditFileResult for edit_file.
+
+    What: PostToolCallHook receives an EditFileResult with a text summary.
+    Why: edit_file returns diff blocks; _extract_tool_result checks for the
+         presence of diff_block and falls back to step_update.text for the
+         summary. This tests the diff_block detection branch.
+    How: Simulate approval + STATE_DONE with a diff_block set and text
+         containing the summary; assert EditFileResult has the summary.
+    """
+    from google.antigravity.connections.local import types as local_types  # pylint: disable=g-import-not-at-top
+
+    await self._run_post_hook_test(
+        confirm_kwargs=dict(
+            edit_file=localharness_pb2.ActionEditFile(
+                file_path="/tmp/file.py",
+            ),
+        ),
+        done_kwargs=dict(
+            text="Applied 2 edits to /tmp/file.py",
+            edit_file=localharness_pb2.ActionEditFile(
+                file_path="/tmp/file.py",
+                diff_block=[
+                    localharness_pb2.ActionEditFile.DiffBlock(
+                        start_line=0,
+                        end_line=1,
+                        lines=[
+                            localharness_pb2.ActionEditFile.DiffLine(
+                                text="+ new line",
+                                action=localharness_pb2.ActionEditFile.DiffLine.LINE_ACTION_INSERT,
+                            ),
+                        ],
+                    ),
+                ],
+            ),
+        ),
+        expected_name=types.BuiltinTools.EDIT_FILE.value,
+        expected_type=local_types.EditFileResult,
+        assertions_fn=lambda r: self.assertIn(
+            "Applied 2 edits", r.result.summary
+        ),
+    )
+
+  async def test_tool_result_for_generate_image(self):
+    """Verifies PostToolCallHook receives GenerateImageResult for generate_image.
+
+    What: PostToolCallHook receives a GenerateImageResult with image_name.
+    Why: generate_image returns the name of the generated image file. Hooks
+         may use this for asset tracking or post-processing.
+    How: Simulate approval + STATE_DONE with image_name set; assert the hook
+         receives GenerateImageResult with the correct image name.
+    """
+    from google.antigravity.connections.local import types as local_types  # pylint: disable=g-import-not-at-top
+
+    await self._run_post_hook_test(
+        confirm_kwargs=dict(
+            generate_image=localharness_pb2.ActionGenerateImage(
+                prompt="sunset photo",
+            ),
+        ),
+        done_kwargs=dict(
+            generate_image=localharness_pb2.ActionGenerateImage(
+                prompt="sunset photo",
+                image_name="sunset_photo",
+            ),
+        ),
+        expected_name=types.BuiltinTools.GENERATE_IMAGE.value,
+        expected_type=local_types.GenerateImageResult,
+        assertions_fn=lambda r: self.assertEqual(
+            r.result.image_name, "sunset_photo"
+        ),
+    )
+
+  async def test_tool_result_fallback_for_view_file(self):
+    """Verifies PostToolCallHook falls back to step text for view_file.
+
+    What: PostToolCallHook receives step text (not a structured result) for
+          tools without structured result fields (e.g. view_file).
+    Why: view_file has no result-bearing fields in the proto (ActionViewFile
+         only has file_path and line range). _extract_tool_result returns None,
+         so the dispatch falls back to step_obj.content (the step text).
+    How: Simulate approval + STATE_DONE with text but no structured result
+         field; assert the hook receives the text string as the result.
+    """
+    await self._run_post_hook_test(
+        confirm_kwargs=dict(
+            view_file=localharness_pb2.ActionViewFile(
+                file_path="/tmp/file.py",
+            ),
+        ),
+        done_kwargs=dict(
+            text="File viewing",
+            view_file=localharness_pb2.ActionViewFile(
+                file_path="/tmp/file.py",
+            ),
+        ),
+        expected_name=types.BuiltinTools.VIEW_FILE.value,
+        expected_type=None,  # Falls back to text string, not typed result.
+        assertions_fn=lambda r: self.assertIsInstance(r.result, str),
+    )
+
+  # ---- Error path ----
+
+  async def test_on_tool_error_dispatched_for_builtin_error(self):
+    """Verifies OnToolErrorHook fires when a builtin tool transitions to STATE_ERROR.
+
+    What: OnToolErrorHook receives a RuntimeError with the harness error
+    message.
+    Why: Users need observability into builtin tool failures for logging and
+         recovery. The harness reports errors via STATE_ERROR transitions.
+    How: Simulate approval + STATE_ERROR with an error_message; assert the hook
+         receives a RuntimeError containing the message text.
+    """
+    hook_event = asyncio.Event()
+    captured_errors = []
+
+    class CapturingErrorHook(hooks_base.OnToolErrorHook):
+
+      async def run(self, context, data):  # pylint: disable=unused-argument
+        captured_errors.append(data)
+        hook_event.set()
+        return None
+
+    hr = hook_runner.HookRunner()
+    hr.register_hook(CapturingErrorHook())
+    harness = self._make_harness(hr)
+
+    confirm = self._make_confirm_event(
+        0,
+        "traj_err",
+        run_command=localharness_pb2.ActionRunCommand(
+            command_line="failing_cmd",
+        ),
+    )
+    error = localharness_pb2.OutputEvent(
+        step_update=localharness_pb2.StepUpdate(
+            step_index=0,
+            trajectory_id="traj_err",
+            cascade_id="traj_err",
+            state=localharness_pb2.StepUpdate.STATE_ERROR,
+            source=localharness_pb2.StepUpdate.SOURCE_MODEL,
+            error_message="Permission denied",
+        )
+    )
+    await self._confirm_and_complete(harness, confirm, error)
+    await harness.wait_for_event(hook_event)
+
+    self.assertEqual(len(captured_errors), 1)
+    self.assertIsInstance(captured_errors[0], RuntimeError)
+    self.assertIn("Permission denied", str(captured_errors[0]))
+
+  # ---- Guard tests ----
+
+  async def test_denied_builtin_not_tracked(self):
+    """Verifies denied builtin tools are not tracked for post-tool dispatch.
+
+    What: PostToolCallHook does NOT fire for denied built-in tool calls.
+    Why: If a Decide hook denies a builtin tool, the harness rejects it and
+         there is no execution to observe. Tracking it would cause stale
+         entries in _pending_builtin_tool_calls or spurious dispatches.
+    How: Deny via Decide hook, send a STATE_DONE for the same step, and
+         verify PostToolCallHook was not called.
+    """
+    hook_fired = asyncio.Event()
+
+    class DenyHook(hooks_base.PreToolCallDecideHook):
+
+      async def run(self, context, data):  # pylint: disable=unused-argument
+        return hooks_base.HookResult(allow=False, message="Denied")
+
+    class PostHook(hooks_base.PostToolCallHook):
+
+      async def run(self, context, data):  # pylint: disable=unused-argument
+        hook_fired.set()
+
+    hr = hook_runner.HookRunner()
+    hr.register_hook(DenyHook())
+    hr.register_hook(PostHook())
+    harness = self._make_harness(hr)
+
+    # Confirmation request — will be denied.
+    await harness.send_event(
+        self._make_confirm_event(
+            0,
+            "traj_deny",
+            view_file=localharness_pb2.ActionViewFile(file_path="/foo"),
+        )
+    )
+    sent_data = await harness.wait_for_response()
+    self.assertFalse(sent_data["toolConfirmation"]["accepted"])
+
+    # Even if the step completes, PostToolCallHook must NOT fire.
+    await harness.send_event(self._make_done_event(0, "traj_deny"))
+    await asyncio.sleep(0.1)
+    self.assertFalse(hook_fired.is_set())
+
+  async def test_no_spurious_hook_for_non_builtin_step(self):
+    """Verifies post-tool hooks don't fire for normal model response steps.
+
+    What: PostToolCallHook does NOT fire for STATE_DONE model response steps.
+    Why: Only steps that were tracked via ToolConfirmation should trigger
+         PostToolCallHook. A model response step that happens to be STATE_DONE
+         must not be confused with a completed builtin tool.
+    How: Send a model response step (no prior confirmation) and verify
+         PostToolCallHook was not called.
+    """
+    hook_fired = asyncio.Event()
+
+    class PostHook(hooks_base.PostToolCallHook):
+
+      async def run(self, context, data):  # pylint: disable=unused-argument
+        hook_fired.set()
+
+    hr = hook_runner.HookRunner()
+    hr.register_hook(PostHook())
+    harness = self._make_harness(hr)
+
+    # A normal model step (not a builtin tool) that is DONE.
+    await harness.send_event(
+        localharness_pb2.OutputEvent(
+            step_update=localharness_pb2.StepUpdate(
+                cascade_id="traj",
+                trajectory_id="traj",
+                step_index=5,
+                text="Final model response",
+                state=localharness_pb2.StepUpdate.STATE_DONE,
+                source=localharness_pb2.StepUpdate.SOURCE_MODEL,
+                target=localharness_pb2.StepUpdate.TARGET_USER,
+            )
+        )
+    )
+    await asyncio.sleep(0.1)
+    self.assertFalse(hook_fired.is_set())
+
+
 if __name__ == "__main__":
   absltest.main()
