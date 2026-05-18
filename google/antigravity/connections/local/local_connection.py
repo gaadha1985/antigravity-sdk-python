@@ -605,7 +605,7 @@ class LocalConnection(connection.Connection):
         for raw_line in stderr_stream:
           line = raw_line.decode("utf-8", errors="replace").rstrip()
           self._stderr_lines.append(line)
-          logging.debug("harness stderr: %s", line)
+          logging.info("harness stderr: %s", line)
       except ValueError:
         pass  # Stream closed.
 
