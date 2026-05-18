@@ -471,7 +471,7 @@ class GeminiConfigTest(unittest.TestCase):
     """Verifies that GeminiConfig can be constructed with all defaults."""
     config = types.GeminiConfig()
     self.assertIsNone(config.api_key)
-    self.assertEqual(config.models.default.name, "gemini-3-flash-preview")
+    self.assertEqual(config.models.default.name, "gemini-3.5-flash")
     self.assertIsNone(config.models.default.generation.thinking_level)
 
   def test_explicit_field_assignment(self):

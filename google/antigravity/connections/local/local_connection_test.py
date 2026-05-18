@@ -1273,7 +1273,7 @@ class LocalConnectionStrategyConfigTest(parameterized.TestCase):
     """
     strategy = self._make_strategy(gemini_config=types.GeminiConfig())
     config = strategy._build_harness_config()
-    self.assertEqual(config.gemini_config.model_name, "gemini-3-flash-preview")
+    self.assertEqual(config.gemini_config.model_name, "gemini-3.5-flash")
     # api_key should not be set (proto default empty string).
     self.assertEqual(config.gemini_config.api_key, "")
 
@@ -1286,7 +1286,7 @@ class LocalConnectionStrategyConfigTest(parameterized.TestCase):
     """
     strategy = self._make_strategy(gemini_config=types.GeminiConfig())
     config = strategy._build_harness_config()
-    self.assertEqual(config.gemini_config.model_name, "gemini-3-flash-preview")
+    self.assertEqual(config.gemini_config.model_name, "gemini-3.5-flash")
 
   def test_gemini_config_string_shorthand(self):
     """Verifies that a bare model name string creates a proper GeminiConfig."""
