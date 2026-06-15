@@ -3926,6 +3926,7 @@ class LocalAgentConfigTest(absltest.TestCase):
         name="my-stdio",
         command="npx",
         args=["math"],
+        env={"FOO": "bar"},
         enabled_tools=["add", "sub"],
     )
     sse_cfg = types.McpStreamableHttpServer(
@@ -3958,6 +3959,7 @@ class LocalAgentConfigTest(absltest.TestCase):
     self.assertEqual(stdio_pb.enabled_tools, ["add", "sub"])
     self.assertEqual(stdio_pb.stdio.command, "npx")
     self.assertEqual(stdio_pb.stdio.args, ["math"])
+    self.assertEqual(dict(stdio_pb.stdio.env), {"FOO": "bar"})
 
     sse_pb = harness_pb.mcp_servers[1]
     self.assertEqual(sse_pb.name, "my-sse")

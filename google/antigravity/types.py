@@ -418,6 +418,8 @@ class McpStdioServer(BaseMcpServerConfig):
     name: Unique identifier for this MCP server.
     type: The type of connection, always "stdio".
     args: Arguments to pass to the command.
+    env: Environment variables to merge into the spawned subprocess's
+      environment.
     enabled_tools: Explicit allowlist of tools to enable. Mutually exclusive
       with disabled_tools. When None, all tools from the server are enabled.
       Only enabled tools are exposed to the model; others are hidden entirely
@@ -431,6 +433,7 @@ class McpStdioServer(BaseMcpServerConfig):
   command: str
   type: Literal["stdio"] = "stdio"
   args: list[str] = pydantic.Field(default_factory=list)
+  env: dict[str, str] | None = None
   enabled_tools: list[str] | None = None
   disabled_tools: list[str] | None = None
 

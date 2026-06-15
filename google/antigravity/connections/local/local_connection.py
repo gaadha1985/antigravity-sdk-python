@@ -1542,6 +1542,7 @@ def _to_mcp_server_proto(
     kwargs["stdio"] = localharness_pb2.McpStdioTransport(
         command=server_cfg.command,
         args=server_cfg.args,
+        env=server_cfg.env or {},
     )
   elif isinstance(server_cfg, types.McpStreamableHttpServer):
     kwargs["http"] = localharness_pb2.McpHttpTransport(

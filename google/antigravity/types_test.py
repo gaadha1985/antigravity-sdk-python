@@ -1404,6 +1404,22 @@ class McpServerConfigTest(parameterized.TestCase):
           {"name": "stdio_server", "command": "node", "args": ["index.js"]},
       ),
       (
+          "stdio_with_env",
+          types.McpStdioServer,
+          {
+              "name": "stdio_server",
+              "command": "node",
+              "args": ["index.js"],
+              "env": {"FOO": "bar"},
+          },
+          {
+              "name": "stdio_server",
+              "command": "node",
+              "args": ["index.js"],
+              "env": {"FOO": "bar"},
+          },
+      ),
+      (
           "http",
           types.McpStreamableHttpServer,
           {"name": "http_server", "url": "http://localhost/http"},
