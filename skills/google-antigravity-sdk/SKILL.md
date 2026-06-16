@@ -25,6 +25,11 @@ ready:
     -   Explain that the API key can be passed explicitly in code as shorthand
         (e.g., `LocalAgentConfig(api_key="...")`) or automatically read from the
         environment.
+    -   For Gemini Enterprise Agent Platform (formerly Vertex AI)
+        authentication, the SDK uses Application Default Credentials (ADC).
+        Instruct the user to run `gcloud auth application-default login` and
+        configure the agent with `vertex=True` along with `project` and
+        `location` in `LocalAgentConfig`.
 
 ## Routing Table
 

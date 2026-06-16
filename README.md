@@ -27,6 +27,35 @@ Get started by running one of the [`examples/`](examples/), such as the
 export GEMINI_API_KEY="your_api_key_here"
 python ./examples/getting_started/hello_world.py
 ```
+## Gemini Enterprise Agent Platform (formerly Vertex AI)
+
+To use the SDK with Gemini Enterprise Agent Platform (formerly Vertex AI),
+configure `LocalAgentConfig` with `vertex=True` and specify your GCP `project`
+and `location`.
+
+By default, the SDK uses Application Default Credentials (ADC) for
+authentication.
+
+```python
+from google.antigravity import Agent, LocalAgentConfig
+
+config = LocalAgentConfig(
+    vertex=True,
+    project="your-gcp-project",
+    location="us-central1",
+)
+
+async with Agent(config) as agent:
+    response = await agent.chat("Hello!")
+    print(await response.text())
+```
+
+Ensure you have authenticated locally before running the agent:
+
+```sh
+gcloud auth application-default login
+```
+
 ## Concepts
 
 ### Simple Agent
