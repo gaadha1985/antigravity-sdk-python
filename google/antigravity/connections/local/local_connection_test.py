@@ -246,6 +246,31 @@ class LocalConnectionTest(unittest.IsolatedAsyncioTestCase):
     self.assertEqual(len(steps), 1)
     self.assertEqual(steps[0].content, "I'm working")
 
+  async def test_receive_steps_mcp_load_failure(self):
+    harness = self._make_harness()
+
+    await harness.conn.send("Hello")
+    init_data = await harness.wait_for_response()
+    self.assertEqual(init_data.get("userInput"), "Hello")
+
+    # Send an error indicating MCP failure.
+    event = localharness_pb2.OutputEvent(
+        trajectory_state_update=localharness_pb2.TrajectoryStateUpdate(
+            trajectory_id="my_cascade",
+            state=localharness_pb2.TrajectoryStateUpdate.STATE_IDLE,
+            error="MCP load failed for dead_server: connection refused",
+        )
+    )
+    await harness.send_event(event)
+    await harness.close_from_harness_side()
+
+    with self.assertRaisesRegex(
+        types.AntigravityExecutionError,
+        "MCP load failed for dead_server: connection refused",
+    ):
+      async for _ in harness.conn.receive_steps():
+        pass
+
   def test_local_connection_step_from_dict(self):
     """Tests that LocalConnectionStep maps fields correctly."""
     step_dict = {
@@ -2229,6 +2254,47 @@ class LocalConnectionStrategyConfigTest(parameterized.TestCase):
     self.assertEqual(
         strategy._workspaces, ["/dev/shm/workspace", "/tmp/clean-path"]
     )
+
+  def test_mcp_servers_propagated(self):
+    """Verifies that mcp_servers are correctly serialized to HarnessConfig."""
+    mcp_servers = [
+        types.McpStreamableHttpServer(
+            name="my_http_server",
+            url="http://localhost:8080/mcp",
+            headers={"Authorization": "Bearer token123"},
+            timeout_seconds=30,
+        ),
+        types.McpStdioServer(
+            name="my_stdio_server",
+            command="node",
+            args=["server.js"],
+            env={"NODE_ENV": "production"},
+            timeout_seconds=10,
+        ),
+    ]
+    strategy = self._make_strategy(mcp_servers=mcp_servers)
+    config = strategy._build_harness_config()
+
+    self.assertLen(config.mcp_servers, 2)
+
+    # Assert HTTP server fields
+    http_server = config.mcp_servers[0]
+    self.assertEqual(http_server.name, "my_http_server")
+    self.assertTrue(http_server.HasField("http"))
+    self.assertEqual(http_server.http.url, "http://localhost:8080/mcp")
+    self.assertEqual(
+        http_server.http.headers["Authorization"], "Bearer token123"
+    )
+    self.assertEqual(http_server.timeout_seconds, 30)
+
+    # Assert Stdio server fields
+    stdio_server = config.mcp_servers[1]
+    self.assertEqual(stdio_server.name, "my_stdio_server")
+    self.assertTrue(stdio_server.HasField("stdio"))
+    self.assertEqual(stdio_server.stdio.command, "node")
+    self.assertEqual(stdio_server.stdio.args, ["server.js"])
+    self.assertEqual(stdio_server.stdio.env["NODE_ENV"], "production")
+    self.assertEqual(stdio_server.timeout_seconds, 10)
 
 
 class LocalConnectionStrategyApiKeyTest(unittest.IsolatedAsyncioTestCase):
